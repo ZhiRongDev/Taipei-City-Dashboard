@@ -7,10 +7,11 @@ The mapStore controls the map and includes methods to modify it.
 !! PLEASE BE SURE TO REFERENCE THE MAPBOX DOCUMENTATION IF ANYTHING IS UNCLEAR !!
 https://docs.mapbox.com/mapbox-gl-js/guides/
 */
-import { createApp, defineComponent, nextTick, ref } from "vue";
+import { createApp, defineComponent, nextTick, ref, watch } from "vue";
 import { defineStore } from "pinia";
 import mapboxGl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
+import Hls from 'hls.js';
 import { ArcLayer } from "@deck.gl/layers";
 import { MapboxOverlay } from "@deck.gl/mapbox";
 import axios from "axios";
@@ -447,7 +448,19 @@ export const useMapStore = defineStore("map", {
 				};
 			}
 			this.loadingLayers.push("rendering");
-			this.map.addLayer({
+			const filterClass = [
+				["6h150r", "6h250r", "6h350r"],
+				["12h200r", "12h300r", "12h400r"],
+				["24h200r", "24h350r", "24h500r", "24h650r"]
+			  ];
+			  
+			  // 初始 filter 設定為第一組 (6 小時降雨)
+			  const initialFilter = [
+				"in",
+				"hazard_class",
+				...filterClass[0]
+			  ];
+			  const config = {
 				id: map_config.layerId,
 				type: map_config.type,
 				"source-layer":
@@ -461,14 +474,58 @@ export const useMapStore = defineStore("map", {
 					...maplayerCommonLayout[`${map_config.type}`],
 					...extra_layout_configs,
 				},
-				source: `${map_config.layerId}-source`,
-			});
+				source: `${map_config.layerId}-source`
+			}
+			if (map_config.layerId === 'wee_hazard_water-fill-extrusion-metrotaipei' || map_config.layerId === 'wee_hazard_water_tp-fill-extrusion-taipei') {
+				config.filter = initialFilter
+			}
+			this.map.addLayer(config);
+			if (map_config.layerId === 'wee_hazard_water-fill-extrusion-metrotaipei' || map_config.layerId === 'wee_hazard_water_tp-fill-extrusion-taipei') this.animateFilter(map_config.layerId);
 			this.currentLayers.push(map_config.layerId);
 			this.mapConfigs[map_config.layerId] = map_config;
 			this.currentVisibleLayers.push(map_config.layerId);
 			this.loadingLayers = this.loadingLayers.filter(
 				(el) => el !== map_config.layerId
 			);
+		},
+		animateFilter(mapLayerId) {
+			this.stopAnimation();
+			const filterClass = [
+				["6h150r", "6h250r", "6h350r"],
+				["12h200r", "12h300r", "12h400r"],
+				["24h200r", "24h350r", "24h500r", "24h650r"]
+			];
+		
+			let index = 1;
+		
+			this.waitUntilReady = setInterval(() => {
+				if (this.loadingLayers.length !== 0) return;
+		
+				clearInterval(this.waitUntilReady); // 停止等待
+				this.waitUntilReady = null;
+		
+				// 啟動動畫
+				this.filterInterval = setInterval(() => {
+					const currentFilter = [
+						"in",
+						"hazard_class",
+						...filterClass[index]
+					];
+		
+					this.map.setFilter(mapLayerId, currentFilter);
+					index = (index + 1) % filterClass.length;
+				}, 1000);
+			}, 200);
+		},
+		stopAnimation() {
+			if (this.filterInterval) {
+				clearInterval(this.filterInterval);
+				this.filterInterval = null;
+			}
+			if (this.waitUntilReady) {
+				clearInterval(this.waitUntilReady);
+				this.waitUntilReady = null;
+			}
 		},
 		// 4-2-1. Add Map Layer for Arc Maps
 		// Developed by Weeee Chill, Taipei Codefest 2024
@@ -669,10 +726,10 @@ export const useMapStore = defineStore("map", {
 					};
 				});
 
-			let lngStart = 121.42955;
-			let lngEnd = 121.68351;
-			let latStart = 24.94679;
-			let latEnd = 25.21811;
+			let lngStart = 121.3;
+			let lngEnd = 122;
+			let latStart = 24.8;
+			let latEnd = 25.3;
 
 			let targetPoints = [];
 			let gridSize = 0.001;
@@ -765,11 +822,31 @@ export const useMapStore = defineStore("map", {
 				this.currentVisibleLayers.push(mapLayerId);
 				this.renderDeckGLLayer();
 			} else {
-				this.map.setLayoutProperty(mapLayerId, "visibility", "visible");
+				if (mapLayerId === 'wee_hazard_water-fill-extrusion-metrotaipei' || mapLayerId === 'wee_hazard_water_tp-fill-extrusion-taipei') {
+					const filterClass = [
+						["6h150r", "6h250r", "6h350r"],
+						["12h200r", "12h300r", "12h400r"],
+						["24h200r", "24h350r", "24h500r", "24h650r"]
+					  ];
+					  
+					  // 初始 filter 設定為第一組 (6 小時降雨)
+					  const initialFilter = [
+						"in",
+						"hazard_class",
+						...filterClass[0]
+					  ];
+					  this.map.setFilter(mapLayerId, initialFilter);
+					this.map.setLayoutProperty(mapLayerId, "visibility", "visible");
+					this.animateFilter(mapLayerId);
+
+				} else {
+					this.map.setLayoutProperty(mapLayerId, "visibility", "visible");
+				}
 			}
 		},
 		// 6. Turn off the visibility of an exisiting map layer but don't remove it completely
 		turnOffMapLayerVisibility(map_config) {
+			this.stopAnimation();
 			map_config.forEach((element) => {
 				let mapLayerId = `${element.index}-${element.type}-${element.city}`;
 				this.loadingLayers = this.loadingLayers.filter(
@@ -846,11 +923,90 @@ export const useMapStore = defineStore("map", {
 			const PopupComponent = defineComponent({
 				extends: MapPopup,
 				setup() {
+					const hls = ref(null)
+					const activeTab = ref(0)
+					const videoRef = ref(null)
+
+					const isHlsUrl = (url) => {
+						return url && (url.includes('.m3u8') || url.includes('hls'))
+					}
+
+					const initHlsPlayer = (videoElement, src) => {
+						
+						if (Hls.isSupported()) {
+							const hlsInstance = new Hls()
+							
+							// 添加錯誤監聽
+							hlsInstance.on(Hls.Events.ERROR, (event, data) => {
+								if (data.fatal) {
+									hlsInstance.destroy();
+								}
+							})
+							
+							hlsInstance.loadSource(src)
+							hlsInstance.attachMedia(videoElement)
+							return hlsInstance
+						} else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+							videoElement.src = src
+							return null
+						}
+						
+						return null
+					}
+
+					const handleVideoLoad = () => {
+						const activeTabValue = activeTab.value
+						let videoElement = videoRef.value
+						
+						// 如果 videoRef 是數組，取第一個元素
+						if (Array.isArray(videoElement)) {
+							videoElement = videoElement[0]
+						}
+						
+						if (!videoElement || !parsedPopupContent[activeTabValue]) {
+							return;
+						}
+						
+						// 找到 video 模式的 property
+						const videoProperty = mapConfigs[activeTabValue].property.find(item => item.mode === 'video')
+						if (!videoProperty) {
+							return;
+						}
+						
+						const videoUrl = parsedPopupContent[activeTabValue].properties[videoProperty.key]
+						if (!videoUrl) {
+							return;
+						}
+						
+						// 如果是 HLS URL，使用 HLS 播放器
+						if (isHlsUrl(videoUrl)) {
+							if (hls.value) {
+								hls.value.destroy()
+							}
+							hls.value = initHlsPlayer(videoElement, videoUrl)
+						} else {
+							videoElement.src = videoUrl
+						}
+					}
+
+					// 初始化影像
+					nextTick(() => {
+						handleVideoLoad()
+					})
+
+					// 監聽 activeTab 變化，重新載入影片
+					watch(activeTab, () => {
+						nextTick(() => {
+							handleVideoLoad()
+						})
+					})
+
 					// Only show the data of the topmost layer
 					return {
 						popupContent: parsedPopupContent,
 						mapConfigs: mapConfigs,
-						activeTab: ref(0),
+						activeTab,
+						videoRef,
 					};
 				},
 			});
